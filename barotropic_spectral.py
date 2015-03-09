@@ -17,7 +17,8 @@ Re = 6378100.              # Radius of earth (m)
 M = 36
 dt = 900.                  # Timestep (seconds)
 ntimes = 480               # Number of time steps to integrate
-time_idx = 0             # Which time in the input files to use for ICs
+output_freq = 6            # Frequency of output plots in hours
+time_idx = 0               # Which time in the input files to use for ICs
 use_hyperdiffusion = True  # Whether or not to apply hyperdiffusion
 damping_order = 1          # Order of dampening
 nu = 1E-4                  # Dampening coefficient for hyperdiffusion
@@ -219,15 +220,16 @@ def integrate(init_cond,bmaps, ntimes=480):
         if n == 0:
             vort_prev = vort_now
         else:
-            vort_prev = (1.-2.*r)*vort_now + r*(vort_next + vort_prev) 
-        curtime = start_time + timedelta(hours = ((n+1)*dt/3600.))
+            vort_prev = (1.-2.*r)*vort_now + r*(vort_next + vort_prev)
+        cur_fhour = (n+1) * dt / 3600.
+        curtime = start_time + timedelta(hours = cur_fhour)
 
         # Output every six hours
-        if (n+1) % 24 == 0 and plot_output:
+        if cur_fhour % output_freq == 0 and plot_output:
             # Go from psi to geopotential
             #phi = divide(psi * f,9.81)
-            print("Plotting hour", (n+1)/4)
-            plot_figures((n+1)/4, curtime, u, v, vort_next, psi, bmaps)
+            print("Plotting hour", cur_fhour)
+            plot_figures(cur_fhour, curtime, u, v, vort_next, psi, bmaps)
         #if dump_output == curtime:
         #    import cPickle
         #    print "Dumping output"
