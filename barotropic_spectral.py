@@ -6,9 +6,8 @@ from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
-from mpl_toolkits.basemap import Basemap, addcyclic
+from mpl_toolkits.basemap import Basemap
 from netCDF4 import Dataset
-from scipy.ndimage.filters import minimum_filter, maximum_filter
 import spharm
 
 
