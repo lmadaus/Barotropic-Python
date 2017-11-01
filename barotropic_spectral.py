@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-from __future__ import print_function, division
-
 import numpy as np
 from datetime import datetime, timedelta
 import matplotlib
@@ -9,107 +7,10 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 from netCDF4 import Dataset
 import spharm
+import namelist as nl
 
 
-# Set parameters
-Re = 6378100.              # Radius of earth (m)
-M = 36
-dt = 900.                  # Timestep (seconds)
-ntimes = 480               # Number of time steps to integrate
-output_freq = 6            # Frequency of output plots in hours
-time_idx = 0               # Which time in the input files to use for ICs
-use_hyperdiffusion = True  # Whether or not to apply hyperdiffusion
-damping_order = 1          # Order of dampening
-nu = 1E-4                  # Dampening coefficient for hyperdiffusion
-restart = None             # Filename of restart file to load
-plot_output = True         # Whether or not to plot the output
-
-
-
-def get_ncep_initial_conditions(uwinds='uwnd.2015.nc',vwinds='vwnd.2015.nc'):
-    """ Load in the initial conditions from 
-    NCAR NCEP Reanalysis netcdf files for
-    uwind and vwind.
-    returns a dictionary of :
-        'u_in'   : u_in, 
-        'v_in'   : v_in,
-        'lons'   : longitude mesh grid,
-        'lats'   : latitude mesh grid,
-        'lamb'   : longitude radian mesh grid,
-        'theta'  : latitude radian mesh grid,
-        'dlamb'  : gradient of lambda,
-        'dtheta' : gradient of theta,
-        'f'      : coriolis paramter at all points
-        '"""
-
-    print("Loading initial conditions from NCEP netcdf:", uwinds, vwinds)
-    #from scipy.io.netcdf import netcdf_file
-    infile = Dataset(uwinds,'r')
-    lev_idx = list(infile.variables['level'][:]).index(500.)
-
-    # Sort out when we are in time
-    epoch_time = datetime(1800,1,1,0)
-    # Find hours since the epoch_time
-    hours_since = infile.variables['time'][time_idx]
-    start_time = epoch_time + timedelta(hours=hours_since)
-    infile.close()
-    #dump_output = start_time + timedelta(hours=36)
-
-    print("START TIME:", start_time.strftime('%Y%m%d%H'))
-    #print "DUMP TIME:", dump_output.strftime('%Y%m%d%H')
-
-    # Check for restart and, if so, load in the initial state from that
-    # Otherwise, look for the pickled restart file
-    if restart is None:
-        # Load the U winds
-        with Dataset(uwinds,'r') as infile:
-            # Stay away from the poles in the latitude dimension
-            u_in = infile.variables['uwnd'][time_idx,lev_idx,1:-1,:]
-            #u_in = squeeze(u_in)
-            # Duplicate the last longitude column for periodicity
-            ulast = u_in[:,0]
-            uint = np.transpose(u_in)
-            newu = np.vstack((uint,ulast))
-            u_in = np.transpose(newu)
-    
-        # Similar for V
-        with Dataset(vwinds,'r') as infile:
-            v_in = infile.variables['vwnd'][time_idx,lev_idx,1:-1,:]
-    
-            #v_in = squeeze(v_in)
-            vlast = v_in[:,0]
-            vint = np.transpose(v_in)
-            newv = np.vstack((vint,vlast))
-            v_in = np.transpose(newv)
-
-            # Get the lats and lons respecting the dimensions
-            lat_list = list(infile.variables['lat'][1:-1])
-            lon_list = list(infile.variables['lon'][:])
-            lon_list.append(360.)
-            #print lon_list
-            #raw_input()
-    else:
-        import cPickle
-        infile = open(restart,'r')
-        u_in,v_in,lat_list,lon_list = cPickle.load(infile)
-        infile.close()
-        
-
-
-
-    return {'u_in' : u_in,
-            'v_in' : v_in,
-            'lons' : lon_list,
-            'lats' : lat_list,
-            'start_time' : start_time}
-
-
-
-# Initial conditions
-#u = 25 * cos(theta) - 30 * cos(theta)**3 + 300 * sin(theta)**2 * cos(theta)**6
-#v = zeros(shape(u))
-
-def integrate(init_cond,bmaps, ntimes=480):
+def integrate(init_cond, bmaps):
     """ Function that integrates the barotropic model using
     spherical harmonics
     
@@ -119,16 +20,16 @@ def integrate(init_cond,bmaps, ntimes=480):
         and longitudes describing the grids, and a starting time
     bmaps :  a dictionary of global and regional basemaps and
         projected coordinates
-    ntimes : Number of timesteps to integrate
-
-
     """
 
 
     # Get the initial u and v wind fields
     u = init_cond['u_in']
     v = init_cond['v_in']
-    ntrunc = len(init_cond['lats'])
+    if nl.M is None:
+        ntrunc = len(init_cond['lats'])
+    else:
+        ntrunc = nl.M
     start_time = init_cond['start_time']
 
     # Create a radian grid
@@ -146,16 +47,15 @@ def integrate(init_cond,bmaps, ntimes=480):
 
 
     # Here is the Coriolis parameter
-    f = 2 * 7.292E-5 * np.sin(theta)
-
+    f = 2 * nl.omega * np.sin(theta)
 
 
     # Set up the spherical harmonic transform object
-    s = spharm.Spharmt(len(init_cond['lons']),len(init_cond['lats']),rsphere=Re,gridtype='regular',legfunc='computed')
+    s = spharm.Spharmt(len(init_cond['lons']),len(init_cond['lats']),rsphere=nl.Re,gridtype='regular',legfunc='computed')
 
     # Use the object to plot the initial conditions
     # First convert to vorticity using spharm object
-    vort_spec, div_spec = s.getvrtdivspec(u,v)
+    vort_spec, div_spec = s.getvrtdivspec(u, v, ntrunc=ntrunc)
     div_spec = np.zeros(vort_spec.shape)  # Only want non-divergent part of wind 
     # Re-convert this to u-v winds to get the non-divergent component
     # of the wind field
@@ -171,10 +71,10 @@ def integrate(init_cond,bmaps, ntimes=480):
     plot_figures(0,curtime,u,v,vort_now,psi,bmaps)
 
     # Now loop through the timesteps
-    for n in xrange(ntimes):
+    for n in range(nl.ntimes):
         
         # Compute spectral vorticity from u and v wind
-        vort_spec, div_spec = s.getvrtdivspec(u,v)  
+        vort_spec, div_spec = s.getvrtdivspec(u, v, ntrunc=ntrunc)
         
         # Now get the actual vorticity
         vort_now = s.spectogrd(vort_spec)
@@ -183,59 +83,50 @@ def integrate(init_cond,bmaps, ntimes=480):
 
         # Here we actually compute vorticity tendency
         # Compute tendency with beta as only forcing
-        vort_tend_rough = -2. * 7.292E-5/(Re**2) * d_dlamb(psi,dlamb) -\
+        vort_tend_rough = -2. * nl.omega/(nl.Re**2) * d_dlamb(psi,dlamb) -\
                 Jacobian(psi,vort_now,theta,dtheta,dlamb)
         
         # Apply hyperdiffusion if requested for smoothing
-        if use_hyperdiffusion:
-            vort_tend = add_hyperdiffusion(s,vort_now,vort_tend_rough, ntrunc)
+        if nl.use_hyper:
+            vort_tend = add_hyperdiffusion(s, vort_now, vort_tend_rough, ntrunc)
         else:
             vort_tend = vort_tend_rough
 
         if n == 0:
             # First step just do forward difference
             # Vorticity at next time is just vort + vort_tend * dt
-            vort_next = vort_now + vort_tend[:,:,0] * dt
+            vort_next = vort_now + vort_tend[:,:] * nl.dt
         else:
             # Otherwise do leapfrog
-            vort_next = vort_prev + vort_tend[:,:,0] * 2 * dt 
+            vort_next = vort_prev + vort_tend[:,:] * 2 * nl.dt 
 
 
         # Invert this new vort to get the new psi (or rather, uv winds)
         # First go back to spectral space
-        vort_spec = s.grdtospec(vort_next)
-        div_spec = s.grdtospec(div)
+        vort_spec = s.grdtospec(vort_next, ntrunc=ntrunc)
+        div_spec = s.grdtospec(div, ntrunc=ntrunc)
 
         # Now use the spharm methods to get new u and v grid
         u,v = s.getuv(vort_spec,div_spec)
         psi,chi = s.getpsichi(u,v)
-        #raw_input()
         
         # Change vort_now to vort_prev
         # and if not first step add Robert filter 
         # (from Held barotropic model)
         # to dampen out crazy modes
-        r = 0.2
         if n == 0:
             vort_prev = vort_now
         else:
-            vort_prev = (1.-2.*r)*vort_now + r*(vort_next + vort_prev)
-        cur_fhour = (n+1) * dt / 3600.
+            vort_prev = (1.-2.*nl.r)*vort_now + nl.r*(vort_next + vort_prev)
+        cur_fhour = (n+1) * nl.dt / 3600.
         curtime = start_time + timedelta(hours = cur_fhour)
 
-        # Output every six hours
-        if cur_fhour % output_freq == 0 and plot_output:
+        # Output every [output_frequ] hours
+        if cur_fhour % nl.output_freq == 0 and nl.plot_output:
             # Go from psi to geopotential
-            #phi = divide(psi * f,9.81)
             print("Plotting hour", cur_fhour)
-            plot_figures(cur_fhour, curtime, u, v, vort_next, psi, bmaps)
-        #if dump_output == curtime:
-        #    import cPickle
-        #    print "Dumping output"
-        #    outfile = open('%s_output.pickle' % (dump_output.strftime('%Y%m%d%H')),'w')
-        #    cPickle.dump((u,v,lat_list,lon_list),outfile)
-        #    outfile.close()
-        #    exit()
+            plot_figures(int(cur_fhour), curtime, u, v, vort_next, psi, bmaps)
+            
 
 def add_hyperdiffusion(s, cur_vort, vort_tend, ntrunc):
     """ Add spectral hyperdiffusion and return a new
@@ -245,7 +136,7 @@ def add_hyperdiffusion(s, cur_vort, vort_tend, ntrunc):
     vort_tend_spec = s.grdtospec(vort_tend)
     total_length = vort_spec.shape[0]
 
-    # Reshape to 2-d arrayw
+    # Reshape to 2-d array
     vort_spec = np.reshape(vort_spec,(ntrunc,-1))
     vort_tend_spec = np.reshape(vort_tend_spec,(ntrunc,-1))
     new_vort_tend_spec = np.array(vort_tend_spec,dtype=np.complex)
@@ -253,10 +144,10 @@ def add_hyperdiffusion(s, cur_vort, vort_tend, ntrunc):
     DES = compute_dampening_eddy_sponge(vort_tend_spec.shape)
 
     # Now loop through each value
-    for n in xrange(vort_spec.shape[1]):
-        for m in xrange(vort_spec.shape[0]):
+    for n in range(vort_spec.shape[1]):
+        for m in range(vort_spec.shape[0]):
             num = vort_tend_spec[m,n] - DES[m,n] * vort_spec[m,n]
-            den = np.complex(1.,0) + DES[m,n] * np.complex(dt,0.)
+            den = np.complex(1.,0) + DES[m,n] * np.complex(nl.dt,0.)
 
             new_vort_tend_spec[m,n] = num / den
 
@@ -283,18 +174,17 @@ def compute_dampening_eddy_sponge(fieldshape):
     spherical_wave = np.zeros(fieldshape)
     eigen_laplacian = np.zeros(fieldshape)
     
-    fourier_inc = 1
 
     for n in n_vals:
         for m in m_vals:
-            fourier_wave = m * fourier_inc
+            fourier_wave = m * nl.fourier_inc
             spherical_wave[m,n] = fourier_wave + n
 
     # Now for the laplacian
-    eigen_laplacian = np.divide(np.multiply(spherical_wave,np.add(spherical_wave,1.)),Re**2)
+    eigen_laplacian = np.divide(np.multiply(spherical_wave,np.add(spherical_wave,1.)),nl.Re**2)
 
     # Dampening Eddy Sponge values
-    DES = np.multiply(eigen_laplacian, nu) 
+    DES = np.multiply(eigen_laplacian, nl.nu) 
             # Do complex divison
     #DES = multiply(DES,2*dt)
     #for n in n_vals:
@@ -317,7 +207,7 @@ def create_basemaps(lons,lats):
 
     # Set up a global map
     bmap_globe = Basemap(projection='merc',llcrnrlat=-70, urcrnrlat=70,\
-               llcrnrlon=0,urcrnrlon=360,lat_ts=20,resolution='c')
+                         llcrnrlon=0,urcrnrlon=360,lat_ts=20,resolution='c')
     xg,yg = bmap_globe(long,latg)
    
     # Set up a regional map (currently North America)
@@ -337,12 +227,13 @@ def plot_figures(n,curtime,u,v,vort,psi,bmaps):
     
     
     plt.figure(figsize=(12,12))
-    plt.contourf(bmaps['global_x'],bmaps['global_y'],vort,np.linspace(-1.E-4,1.E-4,10), cmap=matplotlib.cm.RdBu,extend='both',antialiasing=False)
-    plt.hold(True)
+    cs = plt.contourf(bmaps['global_x'],bmaps['global_y'],vort,np.linspace(-1.E-4,1.E-4,10),
+                      cmap=matplotlib.cm.RdBu,extend='both',antialiasing=False)
+    plt.colorbar(orientation='horizontal')
     plt.quiver(bmaps['global_x'],bmaps['global_y'],u,v)
     bmaps['global'].drawcoastlines()
     plt.title('Zeta and wind at %d hours (%s)' % (n,curtime.strftime('%Y%m%d%H')))
-    plt.savefig('globe_plot_%03d.png' % (n), bbox_inches='tight')
+    plt.savefig('{}/globe_plot_{:03d}.png'.format(nl.figdir,n), bbox_inches='tight')
     plt.close()
 
     # North America plot with geopotential height
@@ -352,8 +243,9 @@ def plot_figures(n,curtime,u,v,vort,psi,bmaps):
     windmag = np.sqrt(u**2 + v**2)
     
 
-    plt.contourf(bmaps['regional_x'],bmaps['regional_y'],windmag,np.arange(15,48,3),cmap=matplotlib.cm.jet,extend='max',antialiasing=False)
-    plt.hold(True)
+    cs = plt.contourf(bmaps['regional_x'],bmaps['regional_y'],windmag,np.arange(15,48,3),
+                 cmap=matplotlib.cm.jet,extend='max',antialiasing=False)
+    plt.colorbar(orientation='horizontal')
     hgtconts = plt.contour(bmaps['regional_x'],bmaps['regional_y'],phi,np.linspace(-500,500,26),colors='k')
     bmaps['regional'].drawcoastlines()
     bmaps['regional'].drawcountries()
@@ -361,7 +253,7 @@ def plot_figures(n,curtime,u,v,vort,psi,bmaps):
 
     plt.title('Hgt anomalies and wind at %d hours (%s)' %(n,curtime.strftime('%Y%m%d%H')))
     print("Saving hour", n)
-    plt.savefig('reg_plot_%03d.png' % (n), bbox_inches='tight')
+    plt.savefig('{}/reg_plot_{:03d}.png'.format(nl.figdir,n), bbox_inches='tight')
     plt.close()
 
     #os.system('mv *.png ~/public_html/research/barotropic')              
@@ -390,33 +282,32 @@ def d_dtheta(field,dtheta):
 
 def divergence_spher(u,v,theta,dtheta,dlamb):
     """ Compute the divergence field in spherical coordinates """
-    term1 = 1./(Re*np.cos(theta)) * d_dlamb(u,dlamb)
-    term2 = 1./(Re*np.cos(theta)) * d_dtheta(v * np.cos(theta)),dtheta
+    term1 = 1./(nl.Re*np.cos(theta)) * d_dlamb(u,dlamb)
+    term2 = 1./(nl.Re*np.cos(theta)) * d_dtheta(v * np.cos(theta)),dtheta
     return term1 + term2  
 
 def vorticity_spher(u,v,theta,dtheta,dlamb):
     """ Computes normal component of vorticity in spherical
     coordinates """
-    term1 = 1./(Re*np.cos(theta)) * d_dlamb(v,dlamb)
-    term2 = 1./(Re*np.cos(theta)) * d_dtheta(u*np.cos(theta),dtheta)
+    term1 = 1./(nl.Re*np.cos(theta)) * d_dlamb(v,dlamb)
+    term2 = 1./(nl.Re*np.cos(theta)) * d_dtheta(u*np.cos(theta),dtheta)
     return term1 - term2
 
 def wind_stream(psi,theta,dtheta,dlamb):
     """ Compute u and v winds from streamfunction in spherical
     coordinates """
-    u = -1./Re * d_dtheta(psi,dtheta)
-    v = 1./(Re * np.cos(theta)) * d_dlamb(psi,dlamb)
+    u = -1./nl.Re * d_dtheta(psi,dtheta)
+    v = 1./(nl.Re * np.cos(theta)) * d_dlamb(psi,dlamb)
     return u,v
 
 def Jacobian(A,B,theta,dtheta,dlamb):
     """ Returns the Jacobian of two fields in spherical coordinates """
     term1 = d_dlamb(A,dlamb) * d_dtheta(B,dtheta)
     term2 = d_dlamb(B,dlamb) * d_dtheta(A,dtheta)
-    return 1./(Re**2 * np.cos(theta)) * (term1 - term2)
+    return 1./(nl.Re**2 * np.cos(theta)) * (term1 - term2)
 
 
 if __name__ == '__main__':
-    ics = get_ncep_initial_conditions()
     bmaps = create_basemaps(ics['lons'],ics['lats'])
     integrate(ics,bmaps,ntimes=ntimes)
 
