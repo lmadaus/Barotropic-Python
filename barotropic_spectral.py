@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 import numpy as np
 from datetime import datetime, timedelta
-import matplotlib
-matplotlib.use('agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 import spharm
+import os
+from hyperdiffusion import del4_filter, apply_des_filter
 import namelist as NL # <---- IMPORTANT! Namelist containing constants and other model parameters
+
 
 class Model:
     """
@@ -25,7 +26,7 @@ class Model:
         forcing -> a 2D array (same shape as model fields) containing a
                    vorticity tendency [s^-2] to be imposed at each integration time step
         """
-        # 1) STORE SPACE/TIME VARIABLES
+        # 1) STORE SPACE/TIME VARIABLES (DIMENSIONS)
         # Get the latitudes and longitudes (as lists)
         self.lats = ics['lats']
         self.lons = ics['lons']
@@ -35,7 +36,8 @@ class Model:
         
         # 2) GENERATE/STORE NONDIVERGENT INITIAL STATE
         # Set up the spherical harmonic transform object
-        self.s = spharm.Spharmt(self.nlons(),self.nlats(),rsphere=NL.Re,gridtype='regular',legfunc='computed')
+        self.s = spharm.Spharmt(self.nlons(), self.nlats(), rsphere=NL.Re,
+                                gridtype='regular', legfunc='computed')
         # Truncation for the spherical transformation
         if NL.M is None:
             self.ntrunc = self.nlats()
@@ -48,15 +50,15 @@ class Model:
         div_spec = np.zeros(vortb_spec.shape)  # Only want NON-DIVERGENT part of wind 
         # Re-convert this to u-v winds to get the non-divergent component
         # of the wind field
-        self.ub, self.vb = self.s.getuv(vortb_spec,div_spec)    # MEAN WINDS
-        self.up, self.vp = self.s.getuv(vortp_spec,div_spec)    # PERTURBATION WINDS
+        self.ub, self.vb = self.s.getuv(vortb_spec, div_spec)    # MEAN WINDS
+        self.up, self.vp = self.s.getuv(vortp_spec, div_spec)    # PERTURBATION WINDS
         # Use these winds to get the streamfunction (psi) and 
         # velocity potential (chi)
-        self.psib,chi = self.s.getpsichi(self.ub,self.vb)       # MEAN STREAMFUNCTION
-        self.psip,chi = self.s.getpsichi(self.up,self.vp)       # PERTURBATION STREAMFUNCTION
+        self.psib,chi = self.s.getpsichi(self.ub, self.vb)       # MEAN STREAMFUNCTION
+        self.psip,chi = self.s.getpsichi(self.up, self.vp)       # PERTURBATION STREAMFUNCTION
         # Convert the spectral vorticity to grid
-        self.vort_bar = self.s.spectogrd(vortb_spec)            # MEAN RELATIVE VORTICITY
-        self.vortp = self.s.spectogrd(vortp_spec)               # PERTURBATION RELATIVE VORTICITY
+        self.vort_bar = self.s.spectogrd(vortb_spec)             # MEAN RELATIVE VORTICITY
+        self.vortp = self.s.spectogrd(vortp_spec)                # PERTURBATION RELATIVE VORTICITY
         
         
         # 3) STORE A COUPLE MORE VARIABLES
@@ -73,13 +75,12 @@ class Model:
         return len(self.lats)
     
     
+    
     #==== Primary function: model integrator =========================================    
-    def integrate(self, make_plots=True):
+    def integrate(self):
         """ 
         Integrates the barotropic model using spherical harmonics.
-        
-        Requires:
-        make_plots -> if True, will plot model fields every [NL.output_freq] hours
+        Simulation configuration is set in namelist.py
         """
         # Create a radian grid
         lat_list_r = [x * np.pi/180. for x in self.lats]
@@ -95,7 +96,7 @@ class Model:
 
 
         # Plot Initial Conditions
-        if make_plots:
+        if NL.plot_freq != 0:
             self.plot_figures(0)
 
         
@@ -105,18 +106,21 @@ class Model:
 
             # Here we actually compute vorticity tendency
             # Compute tendency with beta as only forcing
-            vort_tend_rough = -2. * NL.omega/(NL.Re**2) * d_dlamb(self.psip + self.psib, dlamb) -\
-                              Jacobian(self.psip+self.psib, self.vortp+self.vort_bar, theta, dtheta, dlamb)
-            
-            # Now add any imposed vorticity tendency forcing
-            if self.forcing is not None:
-                vort_tend_rough += self.forcing
+            vort_tend = -2. * NL.omega/(NL.Re**2) * d_dlamb(self.psip + self.psib, dlamb) - \
+                        Jacobian(self.psip+self.psib, self.vortp+self.vort_bar, theta, dtheta, dlamb)
+
 
             # Apply hyperdiffusion if requested for smoothing
-            if NL.use_hyper:
-                vort_tend = add_hyperdiffusion(self.s, self.vortp, vort_tend_rough, self.ntrunc).squeeze()
-            else:
-                vort_tend = vort_tend_rough
+            if NL.diff_opt==1:
+                vort_tend -= del4_filter(self.vortp, self.lats, self.lons)
+            elif NL.diff_opt==2:
+                vort_tend = apply_des_filter(self.s, self.vortp, vort_tend, self.ntrunc,
+                                             t = (n+1) * NL.dt / 3600.).squeeze()
+                        
+                    
+            # Now add any imposed vorticity tendency forcing
+            if self.forcing is not None:
+                vort_tend += self.forcing
 
             if n == 0:
                 # First step just do forward difference
@@ -150,8 +154,8 @@ class Model:
             cur_fhour = (n+1) * NL.dt / 3600.
             self.curtime = self.start_time + timedelta(hours = cur_fhour)
 
-            # Output every [output_frequ] hours
-            if cur_fhour % NL.output_freq == 0 and NL.plot_output:
+            # Make figure(s) every <plot_freq> hours
+            if NL.plot_freq!=0 and cur_fhour % NL.plot_freq == 0:
                 # Go from psi to geopotential
                 print("Plotting hour", cur_fhour)
                 self.plot_figures(int(cur_fhour))
@@ -189,7 +193,7 @@ class Model:
         fig.subplots_adjust(bottom=0.2, left=0.05, right=0.95)
         
         xx, yy = self.bmaps['global_x'], self.bmaps['global_y']
-        cs = ax.contourf(xx, yy, vort, vortlevs, cmap=matplotlib.cm.RdBu_r, extend='both', antialiasing=False)
+        cs = ax.contourf(xx, yy, vort, vortlevs, cmap=plt.cm.RdBu_r, extend='both')
         self.bmaps['global'].drawcoastlines()
         ax.quiver(xx[::2,::2], yy[::2,::2], u[::2,::2], v[::2,::2])
         # Plot the forcing
@@ -199,7 +203,9 @@ class Model:
         # Colorbar
         cax = fig.add_axes([0.05, 0.12, 0.9, 0.03])
         plt.colorbar(cs, cax=cax, orientation='horizontal')
-        plt.savefig('{}/globe_plot_{:03d}.png'.format(NL.figdir,n), bbox_inches='tight')
+        # Save figure
+        if not os.path.isdir(NL.figdir+'/global'): os.makedirs(NL.figdir+'/global')
+        plt.savefig('{}/global/zeta_wnd_{:03d}.png'.format(NL.figdir,n), bbox_inches='tight')
         plt.close()
 
         # MAKE REGIONAL HEIGHT & WIND SPEED MAP
@@ -209,7 +215,7 @@ class Model:
         xx, yy = self.bmaps['regional_x'], self.bmaps['regional_y']
         # Calculate wind speed
         wspd = np.sqrt(u**2 + v**2)
-        cs = ax.contourf(xx, yy, wspd, windlevs, cmap=plt.cm.viridis, extend='max', antialiasing=False)
+        cs = ax.contourf(xx, yy, wspd, windlevs, cmap=plt.cm.viridis, extend='max')
         self.bmaps['regional'].drawcoastlines()
         self.bmaps['regional'].drawcountries()
         self.bmaps['regional'].drawstates()
@@ -221,7 +227,9 @@ class Model:
         # Colorbar
         cax = fig.add_axes([0.05, 0.12, 0.9, 0.03])
         plt.colorbar(cs, cax=cax, orientation='horizontal')
-        plt.savefig('{}/reg_plot_{:03d}.png'.format(NL.figdir,n), bbox_inches='tight')
+        # Save figure
+        if not os.path.isdir(NL.figdir+'/regional'): os.makedirs(NL.figdir+'/regional')
+        plt.savefig('{}/regional/hgt_wspd_{:03d}.png'.format(NL.figdir,n), bbox_inches='tight')
         plt.close()
             
             
@@ -237,12 +245,13 @@ def create_basemaps(lons,lats):
     long, latg = np.meshgrid(lons,lats)
 
     # Set up a global map
-    bmap_globe = Basemap(projection='merc',llcrnrlat=-70, urcrnrlat=70,\
+    bmap_globe = Basemap(projection='merc',llcrnrlat=-70, urcrnrlat=70,
                          llcrnrlon=0,urcrnrlon=360,lat_ts=20,resolution='c')
     xg,yg = bmap_globe(long,latg)
    
     # Set up a regional map (currently Pacific and N. America)
-    bmap_reg = Basemap(projection='merc',llcrnrlat=0,urcrnrlat=65,llcrnrlon=80, urcrnrlon=290, lat_ts=20,resolution='l')
+    bmap_reg = Basemap(projection='merc',llcrnrlat=0,urcrnrlat=65,llcrnrlon=80, 
+                       urcrnrlon=290, lat_ts=20,resolution='l')
     xr,yr = bmap_reg(long,latg)
 
     return {'global' : bmap_globe, 
@@ -252,68 +261,6 @@ def create_basemaps(lons,lats):
             'regional_x' : xr, 
             'regional_y' : yr, 
             }
-
-
-def add_hyperdiffusion(s, cur_vort, vort_tend, ntrunc):
-    """ Add spectral hyperdiffusion and return a new
-    vort_tend """
-    # Convert to spectral grids
-    vort_spec = s.grdtospec(cur_vort)
-    vort_tend_spec = s.grdtospec(vort_tend)
-    total_length = vort_spec.shape[0]
-
-    # Reshape to 2-d array
-    vort_spec = np.reshape(vort_spec,(ntrunc,-1))
-    vort_tend_spec = np.reshape(vort_tend_spec,(ntrunc,-1))
-    new_vort_tend_spec = np.array(vort_tend_spec,dtype=np.complex)
-
-    DES = compute_dampening_eddy_sponge(vort_tend_spec.shape)
-
-    # Now loop through each value
-    for n in range(vort_spec.shape[1]):
-        for m in range(vort_spec.shape[0]):
-            num = vort_tend_spec[m,n] - DES[m,n] * vort_spec[m,n]
-            den = np.complex(1.,0) + DES[m,n] * np.complex(NL.dt,0.)
-
-            new_vort_tend_spec[m,n] = num / den
-
-    # Reshape the new vorticity tendency and convert back to grid
-    new_vort_tend_spec = np.reshape(new_vort_tend_spec, (total_length,-1))
-
-    new_vort_tend = s.spectogrd(new_vort_tend_spec)
-
-    return new_vort_tend
-
-
-def compute_dampening_eddy_sponge(fieldshape):
-    """ Computes the eddy sponge by getting the eigenvalues 
-    of the Laplacian for each spectral coefficient and 
-    multiplying them by a dampening factor nu 
-    (specified in the namelist) 
-    From Held and Suarez
-    """
-    
-    # Need some arrays
-    m_vals = range(fieldshape[0])
-    n_vals = range(fieldshape[1])
-
-    spherical_wave = np.zeros(fieldshape)
-    eigen_laplacian = np.zeros(fieldshape)
-    
-
-    for n in n_vals:
-        for m in m_vals:
-            fourier_wave = m * NL.fourier_inc
-            spherical_wave[m,n] = fourier_wave + n
-
-    # Now for the laplacian
-    eigen_laplacian = np.divide(np.multiply(spherical_wave,np.add(spherical_wave,1.)),NL.Re**2)
-
-    # Dampening Eddy Sponge values
-    DES = np.multiply(eigen_laplacian, NL.nu) 
-    DES_cpx = np.array(DES, dtype=np.complex)
-
-    return DES_cpx
 
 def d_dlamb(field,dlamb):
     """ Finds a finite-difference approximation to gradient in
@@ -326,26 +273,6 @@ def d_dtheta(field,dtheta):
     the theta (latitude) direction """
     out = np.divide(np.gradient(field)[0],dtheta)
     return out
-
-def divergence_spher(u,v,theta,dtheta,dlamb):
-    """ Compute the divergence field in spherical coordinates """
-    term1 = 1./(NL.Re*np.cos(theta)) * d_dlamb(u,dlamb)
-    term2 = 1./(NL.Re*np.cos(theta)) * d_dtheta(v * np.cos(theta)),dtheta
-    return term1 + term2  
-
-def vorticity_spher(u,v,theta,dtheta,dlamb):
-    """ Computes normal component of vorticity in spherical
-    coordinates """
-    term1 = 1./(NL.Re*np.cos(theta)) * d_dlamb(v,dlamb)
-    term2 = 1./(NL.Re*np.cos(theta)) * d_dtheta(u*np.cos(theta),dtheta)
-    return term1 - term2
-
-def wind_stream(psi,theta,dtheta,dlamb):
-    """ Compute u and v winds from streamfunction in spherical
-    coordinates """
-    u = -1./NL.Re * d_dtheta(psi,dtheta)
-    v = 1./(NL.Re * np.cos(theta)) * d_dlamb(psi,dlamb)
-    return u,v
 
 def Jacobian(A,B,theta,dtheta,dlamb):
     """ Returns the Jacobian of two fields in spherical coordinates """
@@ -361,12 +288,12 @@ def test_case():
     perturbations and a gaussian vorticity tendency forcing.
     """
     from time import time
-    
     start = time()
+    
     # 1) LET'S CREATE SOME INITIAL CONDITIONS
-    lon_list = list(np.arange(0, 360.1, 2.5))
-    lat_list = list(np.arange(-87.5, 88, 2.5))[::-1]
-    lamb, theta = np.meshgrid([x * np.pi/180. for x in lon_list], [x * np.pi/180. for x in lat_list])
+    lons = np.arange(0, 360.1, 2.5)
+    lats = np.arange(-87.5, 88, 2.5)[::-1]
+    lamb, theta = np.meshgrid(lons * np.pi/180., lats * np.pi/180.)
     # Mean state: zonal extratropical jets
     ubar = 25 * np.cos(theta) - 30 * np.cos(theta)**3 + 300 * np.sin(theta)**2 * np.cos(theta)**6
     vbar = np.zeros(np.shape(ubar))
@@ -377,15 +304,15 @@ def test_case():
     thetaW = np.deg2rad(15)
     vort_pert = 0.5*A*np.cos(theta)*np.exp(-((theta-theta0)/thetaW)**2)*np.cos(m*lamb)
     # Get U' and V' from this vorticity perturbation
-    s = spharm.Spharmt(len(lon_list), len(lat_list), gridtype='regular', legfunc='computed', rsphere=NL.Re)
+    s = spharm.Spharmt(len(lons), len(lats), gridtype='regular', legfunc='computed', rsphere=NL.Re)
     uprime, vprime = s.getuv(s.grdtospec(vort_pert), np.zeros(np.shape(s.grdtospec(vort_pert))))
     # Full initial conditions dictionary:
     ics = {'u_bar'  : ubar,
            'v_bar'  : vbar,
            'u_prime': uprime,
            'v_prime': vprime,
-           'lons'   : lon_list,
-           'lats'   : lat_list,
+           'lons'   : lons,
+           'lats'   : lats,
            'start_time' : datetime(2017,1,1,0)}
 
     # 2) LET'S ALSO FEED IN A GAUSSIAN NH RWS FORCING
@@ -395,8 +322,8 @@ def test_case():
     d = np.sqrt(x*x+y*y)
     sigma, mu = 0.5, 0.0
     g = np.exp(-( (d-mu)**2 / ( 2.0 * sigma**2 ) ) )   # GAUSSIAN CURVE
-    lat_i = np.where(np.array(lat_list)==35.)[0][0]
-    lon_i = np.where(np.array(lon_list)==160.)[0][0]
+    lat_i = np.where(lats==35.)[0][0]
+    lon_i = np.where(lons==160.)[0][0]
     forcing[lat_i:lat_i+10, lon_i:lon_i+10] = g*amplitude
 
     # 3) INTEGRATE!
