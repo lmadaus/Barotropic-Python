@@ -5,32 +5,32 @@ Module for handling vorticity tendency diffusion in a barotropic model.
 """
 
 import numpy as np
+import namelist as NL
 
 #====================================================================================
 #==== N. Weber's new hyperdiffusion scheme ==========================================
 #====================================================================================
 
-def del4_filter(zeta, lats, lons, k=2.338e16):
+def del4_filter(zeta, lats, lons):
     """
     Calculates/returns the diffusion term of the barotropic vorticity equation,
     which is subtracted from the overall vorticity tendency.
     
     Diffusion is calculated with the following formula:
     D = k * del^4(vorticity)
-    (k value taken from Sardeshmukh and Hoskins 1988)
+    [default namelist k value (2.338e16) taken from Sardeshmukh and Hoskins 1988]
     
     Requires:
     data --> 2D numpy array of data (e.g., global vorticity field)
              shape(data) = (nlats, nlons)
     lats --> 1D array/list of the corresponding latitudes (in degrees)
     lons --> 1D array/list of the corresponding longitudes (in degrees)
-    k -----> diffusion coefficient (float)
     
     Returns:
     2-dimensional numpy array (same shape as <data>) 
     """
     del4vort = del4(zeta, lats, lons)
-    return k * del4vort
+    return NL.k * del4vort
 
 
 def del4(data, lats, lons):
