@@ -102,8 +102,7 @@ class Model:
         
         # Now loop through the timesteps
         for n in range(NL.ntimes):
-  
-
+            
             # Here we actually compute vorticity tendency
             # Compute tendency with beta as only forcing
             vort_tend = -2. * NL.omega/(NL.Re**2) * d_dlamb(self.psip + self.psib, dlamb) - \
@@ -248,7 +247,7 @@ def create_basemaps(lons,lats):
     bmap_globe = Basemap(projection='merc',llcrnrlat=-70, urcrnrlat=70,
                          llcrnrlon=0,urcrnrlon=360,lat_ts=20,resolution='c')
     xg,yg = bmap_globe(long,latg)
-   
+    
     # Set up a regional map (currently Pacific and N. America)
     bmap_reg = Basemap(projection='merc',llcrnrlat=0,urcrnrlat=65,llcrnrlon=80, 
                        urcrnrlon=290, lat_ts=20,resolution='l')
